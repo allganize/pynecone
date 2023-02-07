@@ -21,6 +21,38 @@ ComponentCallable = Callable[[], Component]
 Reducer = Callable[[Event], Coroutine[Any, Any, StateUpdate]]
 
 
+class WebSocketManager(Base):
+    ws_id_idx: int = 1
+    websockets: Dict[int, WebSocket] = {}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def set_websocket(self, websocket: WebSocket):
+        ws_id = self.ws_id_idx
+        self.ws_id_idx += 1
+        self.websockets[ws_id] = [websocket, None]
+        return ws_id
+
+    def del_websocket(self, ws_id: int):
+        del self.websockets[ws_id]
+
+    def update_event_token(self, ws_id: int, event_token: str):
+        if ws_id not in self.websockets:
+            return
+
+        self.websockets[ws_id][1] = event_token
+
+    def get_websocket_from_event_token(self, event_token: str):
+        target_ws = None
+        for _, (ws, et) in self.websockets.items():
+            if et == event_token:
+                target_ws = ws
+                break
+
+        return target_ws
+
+
 class App(Base):
     """A Pynecone application."""
 
@@ -47,6 +79,8 @@ class App(Base):
 
     # events handlers to trigger when a page load
     load_events: Dict[str, EventHandler] = {}
+
+    ws_manager = WebSocketManager = WebSocketManager()
 
     def __init__(self, *args, **kwargs):
         """Initialize the app.
@@ -325,6 +359,13 @@ class App(Base):
         # Compile the custom components.
         compiler.compile_components(custom_components)
 
+    async def send_update(self, event_token: str, update: StateUpdate):
+        ws = self.ws_manager.get_websocket_from_event_token(event_token)
+        if ws is None:
+            return
+
+        await ws.send_text(update.json())
+
 
 async def ping() -> str:
     """Test API endpoint.
@@ -353,6 +394,8 @@ def event(app: App):
         """
         # Accept the connection.
         await websocket.accept()
+        ws_id = app.ws_manager.set_websocket(websocket)
+
 
         # Process events until the connection is closed.
         while True:
@@ -361,7 +404,10 @@ def event(app: App):
                 event = Event.parse_raw(await websocket.receive_text())
             except WebSocketDisconnect:
                 # Close the connection.
+                app.ws_manager.del_websocket(ws_id)
                 return
+
+            app.ws_manager.update_event_token(ws_id, event.token)
 
             # Process the event.
             update = await process(app, event)
